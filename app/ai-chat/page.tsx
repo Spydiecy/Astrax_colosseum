@@ -636,7 +636,7 @@ const WELCOME = `Hey, I'm **Astrax** 👋 — your AI agent for **Solana**.
 Try things like:
 - "What's my **SOL** balance?"
 - "Send **1 SOL** to \`<address>\`"
-- "Create a token **MoonCoin MOON** supply **1000000**"
+- "Create a token **MoonCoin MOON** supply **1000000**", or attach an image and say "**mint this as an NFT**"
 - "Show the **latest blocks**" or "**SOL** market data"
 - "Create a **payment link** for 0.5 SOL"
 - "**Swap 0.01 SOL** to USDC"
@@ -894,7 +894,11 @@ function ChatSession({ chatId }: { chatId: string }) {
 
   return (
     <div className="h-full flex flex-col bg-white dark:bg-black text-black dark:text-white transition-colors duration-300">
-      <OnboardingModal isOpen={showOnboarding} onClose={closeOnboarding} />
+      <OnboardingModal
+        isOpen={showOnboarding}
+        onClose={closeOnboarding}
+        onTryPrompt={(p) => { closeOnboarding(); setInput(p) }}
+      />
 
       <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6">
         <div className="w-full space-y-5">
