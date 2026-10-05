@@ -2,8 +2,21 @@ import { streamText, tool } from "ai"
 import { createMistral } from "@ai-sdk/mistral"
 import { createGoogleGenerativeAI } from "@ai-sdk/google"
 import { z } from "zod"
-import { PublicKey, sendAndConfirmTransaction, LAMPORTS_PER_SOL } from "@solana/web3.js"
-import { getAssociatedTokenAddressSync, getAccount } from "@solana/spl-token"
+import { PublicKey, VersionedTransaction, sendAndConfirmTransaction, LAMPORTS_PER_SOL } from "@solana/web3.js"
+import { getAssociatedTokenAddressSync, getAccount, TOKEN_PROGRAM_ID } from "@solana/spl-token"
+import {
+  swapsSupported,
+  quoteSwap,
+  buildSwapTxs,
+  mintSymbols,
+  fromBaseUnits,
+  WSOL_MINT,
+  DEFAULT_SLIPPAGE_BPS,
+  MAX_SLIPPAGE_BPS,
+  MAX_PRICE_IMPACT_PCT,
+  WARN_PRICE_IMPACT_PCT,
+  type SwapQuote,
+} from "@/lib/swap"
 import {
   getConnection,
   getBlockSummary,
@@ -18,9 +31,11 @@ import {
   findToken,
   isNativeToken,
   isValidAddress,
+  shortAddr,
 } from "@/lib/solana"
 import {
   keypairFromSecret,
+  toBaseUnits,
   getMintInfo,
   buildSolTransfer,
   buildTokenTransfer,
@@ -176,6 +191,7 @@ Guidance:
 - "pay alice 500 ${NATIVE_SYMBOL} every month for a year / salary" → scheduleTransfer with every:"monthly", occurrences:12
 - "show my scheduled payments" → listSchedules ; "cancel schedule <id>" → cancelSchedule
 - "payment link for 0.5 ${NATIVE_SYMBOL}" → createPaymentLink ; "my payment links / has my link been paid" → listPaymentLinks
+- "swap 0.1 ${NATIVE_SYMBOL} to USDC / convert / buy USDC with ${NATIVE_SYMBOL}" → swap ; "how much USDC for 1 ${NATIVE_SYMBOL} / quote a swap / swap rate" → getSwapQuote. Swaps go through Raydium's ${CLUSTER} pools; only set slippagePercent if the user asks. The swap card already shows the amounts, minimum, rate, price impact and route, so reply in ONE short sentence (no lists, no "swap details" section). Never suggest a specific amount that would work.
 - "save alice as <address>" → saveContact ; "who is alice" → resolveContact ; "my contacts" → listContacts ; "remove alice" → deleteContact
 - Recipients can be a contact name ("send 1 SOL to alice") — pass the name itself as the recipient.
 - "store asset <link>" → storeAsset ; "my assets" → listAssets
@@ -204,6 +220,8 @@ function friendlyError(e: any): string {
     return "Your wallet isn't the authority for this token, so it can't do that."
   if (/Blockhash not found|block height exceeded|expired/i.test(all))
     return "The network didn't confirm it in time. Nothing was sent; try again."
+  if (/slippage|ExceededSlippage|TooLittleOutputReceived|AmountOutBelowMinimum/i.test(all))
+    return "The price moved more than your slippage allows, so the swap was cancelled and nothing was swapped. Try again."
   if (/429|Too Many Requests/i.test(all)) return "The Solana RPC is rate-limiting requests right now. Try again in a moment."
   return msg.slice(0, 160)
 }
@@ -330,6 +348,128 @@ export async function POST(req: Request) {
       return { mint, programId, decimals, symbol: info?.symbol ?? (mintStr === token ? `${token.slice(0, 4)}…` : token) }
     } catch (e: any) {
       return { error: `Could not read mint ${token}: ${e?.message || "not found"}.` }
+    }
+  }
+
+  // ── Swap helpers ──────────────────────────────────────────────────────────────
+  // The model sometimes follows a quote with a swap in the same turn. Only allow that
+  // when the user's message actually asks to swap (a quote must never move funds).
+  let quotedThisTurn = false
+  const lastUserText = String([...messages].reverse().find((m: any) => m?.role === "user")?.content || "")
+  const userAskedToSwap =
+    /\b(swap|convert|exchange|trade|buy|sell)\b/i.test(lastUserText) &&
+    !/\b(quote|how much|what would|rate|estimate)\b/i.test(lastUserText)
+  // Tool results carry this so the model doesn't retype what the card shows.
+  const CARD_HINT = "The card shows every detail. Reply in one short sentence, with no list."
+
+  type SwapSide = { mint: string; decimals: number; symbol: string; programId: PublicKey; native: boolean }
+  const resolveSwapToken = async (t: string): Promise<SwapSide | { error: string }> => {
+    if (isNativeToken(t) || t.trim() === WSOL_MINT) {
+      return { mint: WSOL_MINT, decimals: 9, symbol: NATIVE_SYMBOL, programId: TOKEN_PROGRAM_ID, native: true }
+    }
+    const r = await resolveToken(t)
+    if ("error" in r) return r
+    return { mint: r.mint.toBase58(), decimals: r.decimals, symbol: r.symbol, programId: r.programId, native: false }
+  }
+
+  // Quote a swap and turn it into the summary the cards show.
+  const prepareSwap = async (fromToken: string, toToken: string, amount: string, slippagePercent?: number) => {
+    if (!swapsSupported()) return { error: `Swaps are only available on devnet right now (this app is on ${CLUSTER}).` }
+    const from = await resolveSwapToken(fromToken)
+    if ("error" in from) return from
+    const to = await resolveSwapToken(toToken)
+    if ("error" in to) return to
+    if (from.mint === to.mint) return { error: "Pick two different tokens to swap." }
+    let raw: bigint
+    try {
+      raw = toBaseUnits(amount, from.decimals)
+    } catch {
+      return { error: `Invalid amount "${amount}".` }
+    }
+    if (raw <= 0n) return { error: "The amount must be more than zero." }
+    const slippageBps = slippagePercent == null ? DEFAULT_SLIPPAGE_BPS : Math.round(slippagePercent * 100)
+    if (!(slippageBps >= 1 && slippageBps <= MAX_SLIPPAGE_BPS)) {
+      return { error: `Slippage must be between 0.01% and ${MAX_SLIPPAGE_BPS / 100}%.` }
+    }
+
+    let quote: SwapQuote
+    try {
+      quote = await quoteSwap({ inputMint: from.mint, outputMint: to.mint, amount: raw, slippageBps })
+    } catch (e: any) {
+      return { error: String(e?.message || "Couldn't get a swap quote.").slice(0, 200) }
+    }
+
+    const symbols = await mintSymbols(quote.route.map((h) => h.outputMint))
+    const sym = (m: string) => (m === from.mint ? from.symbol : m === to.mint ? to.symbol : symbols[m] || shortAddr(m))
+    const inHuman = fromBaseUnits(quote.inAmount, from.decimals, from.decimals)
+    const outHuman = fromBaseUnits(quote.outAmount, to.decimals)
+    const rate = Number(quote.outAmount) / 10 ** to.decimals / (Number(quote.inAmount) / 10 ** from.decimals)
+    const summary = {
+      from: { symbol: from.symbol, mint: from.mint, amount: inHuman },
+      to: { symbol: to.symbol, mint: to.mint, amount: outHuman, min: fromBaseUnits(quote.minOutAmount, to.decimals) },
+      rate: `1 ${from.symbol} ≈ ${Number(rate.toPrecision(6))} ${to.symbol}`,
+      priceImpactPct: Math.round(quote.priceImpactPct * 100) / 100,
+      highImpact: quote.priceImpactPct > WARN_PRICE_IMPACT_PCT,
+      tooHighImpact: quote.priceImpactPct > MAX_PRICE_IMPACT_PCT,
+      slippagePct: slippageBps / 100,
+      route: [from.symbol, ...quote.route.slice(0, -1).map((h) => sym(h.outputMint)), to.symbol],
+      venue: `Raydium (${CLUSTER})`,
+    }
+    return { quote, from, to, summary }
+  }
+
+  // Check the user can pay for the swap, and find their token accounts for it.
+  const swapAccounts = async (
+    owner: PublicKey,
+    from: SwapSide,
+    to: SwapSide,
+    raw: bigint,
+  ): Promise<{ inputAccount?: string; outputAccount?: string } | { error: string }> => {
+    const lamports = BigInt(await connection.getBalance(owner, "confirmed"))
+    // Network fees plus rent for the temporary wrapped-SOL / new token accounts.
+    const buffer = 10_000_000n // 0.01 SOL
+    let inputAccount: string | undefined
+    if (from.native) {
+      if (lamports < raw + buffer) {
+        return { error: `Not enough SOL. You have ${fromBaseUnits(lamports, 9, 4)} SOL and need about ${fromBaseUnits(raw + buffer, 9, 4)} (the amount plus ~0.01 SOL for fees and account rent).` }
+      }
+    } else {
+      if (lamports < buffer) return { error: "You need about 0.01 SOL for network fees and account rent." }
+      const ata = getAssociatedTokenAddressSync(new PublicKey(from.mint), owner, true, from.programId)
+      try {
+        const acc = await getAccount(connection, ata, "confirmed", from.programId)
+        if (acc.amount < raw) return { error: `Not enough ${from.symbol}. You have ${fromBaseUnits(acc.amount, from.decimals)}.` }
+      } catch {
+        return { error: `Your wallet doesn't hold any ${from.symbol}.` }
+      }
+      inputAccount = ata.toBase58()
+    }
+    let outputAccount: string | undefined
+    if (!to.native) {
+      const ata = getAssociatedTokenAddressSync(new PublicKey(to.mint), owner, true, to.programId)
+      if (await connection.getAccountInfo(ata, "confirmed")) outputAccount = ata.toBase58()
+    }
+    return { inputAccount, outputAccount }
+  }
+
+  // What the user actually received in a confirmed swap (best effort).
+  const receivedAmount = async (sig: string, owner: PublicKey, to: SwapSide): Promise<string | undefined> => {
+    try {
+      const tx = await connection.getParsedTransaction(sig, { commitment: "confirmed", maxSupportedTransactionVersion: MAX_TX_VERSION })
+      const meta = tx?.meta
+      if (!meta || !tx) return undefined
+      if (to.native) {
+        const i = tx.transaction.message.accountKeys.findIndex((k) => k.pubkey.equals(owner))
+        if (i < 0) return undefined
+        const delta = BigInt(meta.postBalances[i]) - BigInt(meta.preBalances[i]) + (i === 0 ? BigInt(meta.fee) : 0n)
+        return delta > 0n ? fromBaseUnits(delta, 9) : undefined
+      }
+      const bal = (list: typeof meta.postTokenBalances) =>
+        BigInt(list?.find((b) => b.mint === to.mint && b.owner === owner.toBase58())?.uiTokenAmount.amount ?? "0")
+      const delta = bal(meta.postTokenBalances) - bal(meta.preTokenBalances)
+      return delta > 0n ? fromBaseUnits(delta, to.decimals) : undefined
+    } catch {
+      return undefined
     }
   }
 
@@ -950,15 +1090,101 @@ export async function POST(req: Request) {
         },
       }),
 
-      swap: tool({
-        description: "Swap one token for another on a Solana DEX. Requires a configured DEX/aggregator.",
-        parameters: z.object({ fromToken: z.string(), toToken: z.string(), amount: z.string() }),
-        execute: async ({ fromToken, toToken, amount }) => {
-          const dex = process.env.SOLANA_DEX
-          if (!dex) {
-            return { kind: "swap", fromCurrency: fromToken, toCurrency: toToken, amount, status: "unavailable", note: "No DEX is configured yet. Set SOLANA_DEX to enable on-chain swaps." }
+      // ── SWAPS (Raydium devnet router) ───────────────────────────────────────
+      getSwapQuote: tool({
+        description: `Quote a token swap without doing it: how much the user would get, minimum after slippage, price impact and route. Use for "how much USDC for 1 SOL", "quote a swap", "what's the rate". Tokens: ${NATIVE_SYMBOL}, USDC, or a mint address.`,
+        parameters: z.object({
+          fromToken: z.string().describe(`Token to sell: ${NATIVE_SYMBOL}, USDC or a mint address`),
+          toToken: z.string().describe(`Token to buy: ${NATIVE_SYMBOL}, USDC or a mint address`),
+          amount: z.string().describe("Amount of fromToken to sell, e.g. 0.1"),
+          slippagePercent: z.number().optional().describe("Max slippage in percent. Defaults to 1. Only set if the user asks."),
+        }),
+        execute: async ({ fromToken, toToken, amount, slippagePercent }) => {
+          try {
+            quotedThisTurn = true
+            const p = await prepareSwap(fromToken, toToken, amount, slippagePercent)
+            if ("error" in p) return p
+            return { kind: "swapQuote", ...p.summary, replyHint: `${CARD_HINT} This is only a quote: do not call swap; ask if they want to swap.` }
+          } catch (e: any) {
+            return { error: `Couldn't get a swap quote: ${friendlyError(e)}` }
           }
-          return { kind: "swap", fromCurrency: fromToken, toCurrency: toToken, amount, status: "router-configured", note: "DEX configured — swap execution wiring is a next step." }
+        },
+      }),
+
+      swap: tool({
+        description: `Swap one token for another (exact input) on Solana ${CLUSTER} through Raydium's pools. Use for "swap 0.1 SOL to USDC", "convert 5 USDC to SOL", "buy USDC with 0.2 SOL". Tokens: ${NATIVE_SYMBOL}, USDC, or a mint address.`,
+        parameters: z.object({
+          fromToken: z.string().describe(`Token to sell: ${NATIVE_SYMBOL}, USDC or a mint address`),
+          toToken: z.string().describe(`Token to buy: ${NATIVE_SYMBOL}, USDC or a mint address`),
+          amount: z.string().describe("Amount of fromToken to sell, e.g. 0.1"),
+          slippagePercent: z.number().optional().describe("Max slippage in percent. Defaults to 1. Only set if the user asks."),
+        }),
+        execute: async ({ fromToken, toToken, amount, slippagePercent }) => {
+          if (quotedThisTurn && !userAskedToSwap) {
+            return { error: "Only a quote was asked for, so nothing was swapped. Say \"swap\" to go ahead." }
+          }
+          if (signingMode === "wallet" ? !ownerAddress : !wallet) return noSigner()
+          const owner = new PublicKey(signingMode === "wallet" ? (ownerAddress as string) : wallet!.publicKey)
+
+          let p: Awaited<ReturnType<typeof prepareSwap>>
+          let accounts: Awaited<ReturnType<typeof swapAccounts>>
+          try {
+            p = await prepareSwap(fromToken, toToken, amount, slippagePercent)
+            if ("error" in p) return p
+            accounts = await swapAccounts(owner, p.from, p.to, BigInt(p.quote.inAmount))
+          } catch (e: any) {
+            return { error: `Could not prepare the swap: ${friendlyError(e)}` }
+          }
+          if ("error" in accounts) return accounts
+          if (p.summary.priceImpactPct > MAX_PRICE_IMPACT_PCT) {
+            return {
+              error: `Not swapped: the price impact would be ${p.summary.priceImpactPct.toFixed(1)}% (Astrax's limit is ${MAX_PRICE_IMPACT_PCT}%), because devnet pools have little liquidity. Try a smaller amount.`,
+            }
+          }
+
+          let txs: string[]
+          try {
+            txs = await buildSwapTxs({ quote: p.quote, wallet: owner.toBase58(), ...accounts })
+          } catch (e: any) {
+            return { error: `Could not prepare the swap: ${(e?.message || "unknown error").slice(0, 160)}` }
+          }
+
+          if (signingMode === "wallet") {
+            return {
+              kind: "action",
+              action: "swap",
+              txsBase64: txs,
+              swap: p.summary,
+              label: `Swap ${p.summary.from.amount} ${p.summary.from.symbol} for ${p.summary.to.symbol}`,
+              replyHint: `${CARD_HINT} Tell them to confirm with the button.`,
+            }
+          }
+
+          // Autonomous: sign and send each transaction in order.
+          try {
+            let sig = ""
+            for (const b64 of txs) {
+              const vtx = VersionedTransaction.deserialize(Buffer.from(b64, "base64"))
+              const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed")
+              vtx.message.recentBlockhash = blockhash
+              vtx.sign([wallet!.keypair])
+              sig = await connection.sendTransaction(vtx, { maxRetries: 3 })
+              const res = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed")
+              if (res.value.err) throw new Error(`Swap failed on-chain: ${JSON.stringify(res.value.err)}`)
+            }
+            const received = await receivedAmount(sig, owner, p.to)
+            return {
+              kind: "swap",
+              status: "done",
+              ...p.summary,
+              received,
+              hash: sig,
+              explorerUrl: explorerTx(sig),
+              replyHint: CARD_HINT,
+            }
+          } catch (e: any) {
+            return { error: `Swap not completed: ${friendlyError(e)}` }
+          }
         },
       }),
     },
