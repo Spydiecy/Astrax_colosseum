@@ -3,16 +3,18 @@
 import { useCallback, useEffect, useState } from "react"
 import { useCredentials } from "@/contexts/CredentialsContext"
 import { useConnection, useWallet } from "@solana/wallet-adapter-react"
-import type { Keypair, Transaction } from "@solana/web3.js"
+import { VersionedTransaction, type Keypair, type Transaction } from "@solana/web3.js"
 import { Loader2, Zap, CheckCircle2, ArrowUpRight } from "lucide-react"
 import { explorerTx } from "@/lib/solana"
 import { buildCreateToken, deserializeTx } from "@/lib/spl"
 
 export interface PendingAction {
-  action: "sendNative" | "sendToken" | "deployToken" | "deployNFT" | "mintTokens"
+  action: "sendNative" | "sendToken" | "deployToken" | "deployNFT" | "mintTokens" | "swap"
   label: string
   /** Server-prepared transaction (transfers / mint-to). Absent for create actions. */
   txBase64?: string
+  /** Server-prepared versioned transactions for a swap, signed in order. */
+  txsBase64?: string[]
   to?: string
   mint?: string
   symbol?: string
@@ -27,6 +29,8 @@ export interface PendingAction {
   metadataUri?: string
   image?: string
 }
+
+const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
 
 const short = (a?: string) => (a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a || "")
 
@@ -67,6 +71,33 @@ export function TxActionButton({ id, action, onDone }: { id?: string; action: Pe
     setPhase("wallet")
     setErrMsg("")
     try {
+      // Swaps: Raydium-built versioned transactions (checked on the server), sent in order.
+      if (action.action === "swap") {
+        const list = action.txsBase64 ?? []
+        if (list.length === 0) throw new Error("Missing prepared swap transaction")
+        let last = ""
+        for (const b64 of list) {
+          const vtx = VersionedTransaction.deserialize(b64ToBytes(b64))
+          if (!vtx.message.staticAccountKeys[0]?.equals(publicKey)) {
+            throw new Error("This swap was prepared for a different wallet. Ask Astrax again with this wallet connected.")
+          }
+          // Fresh blockhash so a card that sat for a while still lands.
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed")
+          vtx.message.recentBlockhash = blockhash
+          setPhase("wallet")
+          const sig = await sendTransaction(vtx, connection)
+          setSignature(sig)
+          setPhase("mining")
+          const res = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed")
+          if (res.value.err) throw new Error(`Swap failed on-chain: ${JSON.stringify(res.value.err)}`)
+          last = sig
+        }
+        if (id) localStorage.setItem(doneKey(id), JSON.stringify({ signature: last } satisfies DoneRecord))
+        setPhase("done")
+        onDone?.(last)
+        return
+      }
+
       let tx: Transaction
       let mintAddr: string | undefined
       const signers: Keypair[] = []

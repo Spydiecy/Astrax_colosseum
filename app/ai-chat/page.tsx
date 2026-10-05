@@ -4,10 +4,10 @@ import { useChat } from "@ai-sdk/react"
 import { useEffect, useRef, useState } from "react"
 import { useWallet } from "@solana/wallet-adapter-react"
 import {
-  Bot, User, Send, Mic, MicOff, Loader2, Wallet, ArrowUpRight, Coins,
+  Bot, User, Send, Mic, MicOff, Loader2, Wallet, ArrowUpRight,
   Boxes, LineChart, Link2, Copy, Check, CalendarClock, FileText, Rocket,
   Paperclip, X, Image as ImageIcon, Code, ShieldCheck, ShieldAlert, Info, AlertTriangle,
-  Pencil, RotateCcw,
+  Pencil, RotateCcw, ArrowLeftRight,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -126,7 +126,7 @@ function ranOnChain(msgs: any[]): boolean {
     (m.toolInvocations ?? []).some((inv: any) => {
       const r = inv.state === "result" ? inv.result : null
       if (!r || r.error) return false
-      return r.kind === "deploy" || r.kind === "schedule" || (r.kind === "transaction" && (r.action === "send" || r.action === "mint"))
+      return r.kind === "deploy" || r.kind === "schedule" || r.kind === "swap" || (r.kind === "transaction" && (r.action === "send" || r.action === "mint"))
     }),
   )
 }
@@ -141,6 +141,40 @@ function CopyBtn({ value }: { value: string }) {
     >
       {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5 text-gray-500" />}
     </button>
+  )
+}
+
+/** Rows shared by the swap quote, wallet-mode swap and completed-swap cards. */
+function SwapDetails({ s }: { s: any }) {
+  const impactTone = s.tooHighImpact
+    ? "text-red-600 dark:text-red-400"
+    : s.highImpact
+      ? "text-amber-600 dark:text-amber-400"
+      : ""
+  return (
+    <>
+      <Field label="You pay">{s.from?.amount} {s.from?.symbol}</Field>
+      <Field label={s.received ? "You got" : "You get (est.)"}>
+        <span className="font-medium">{s.received ?? s.to?.amount} {s.to?.symbol}</span>
+      </Field>
+      {!s.received && <Field label="Minimum received">{s.to?.min} {s.to?.symbol}</Field>}
+      <Field label="Rate">{s.rate}</Field>
+      <Field label="Price impact">
+        <span className={cn("inline-flex items-center gap-1", impactTone)}>
+          {(s.highImpact || s.tooHighImpact) && <AlertTriangle className="w-3.5 h-3.5" aria-hidden />}
+          {Number(s.priceImpactPct ?? 0).toFixed(2)}%
+        </span>
+      </Field>
+      <Field label="Max slippage">{s.slippagePct}%</Field>
+      {Array.isArray(s.route) && (
+        <Field label="Route">
+          <span className="text-right">{s.route.join(" → ")} <span className="text-gray-500">· {s.venue}</span></span>
+        </Field>
+      )}
+      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+        Devnet prices come from test pools, so they don&apos;t match the real market.
+      </p>
+    </>
   )
 }
 
@@ -270,6 +304,16 @@ function ToolCard({ result, callId }: { result: any; callId?: string }) {
 
   // Wallet-mode prepared transaction → render a one-click confirm button.
   if (result.kind === "action") {
+    if (result.action === "swap" && result.swap) {
+      return (
+        <div className="w-full max-w-xl">
+          <CardShell icon={<ArrowLeftRight className="w-4 h-4" />} title="Swap">
+            <SwapDetails s={result.swap} />
+          </CardShell>
+          <TxActionButton id={callId} action={result as PendingAction} />
+        </div>
+      )
+    }
     return <TxActionButton id={callId} action={result as PendingAction} />
   }
 
@@ -558,11 +602,28 @@ function ToolCard({ result, callId }: { result: any; callId?: string }) {
     }
     case "swap":
       return (
-        <CardShell icon={<Coins className="w-4 h-4" />} title="Swap">
-          <Field label="From">{result.amount} {result.fromCurrency}</Field>
-          <Field label="To">{result.toCurrency}</Field>
-          <Field label="Status">{result.status}</Field>
-          {result.note && <p className="mt-2 text-xs text-gray-500">{result.note}</p>}
+        <CardShell icon={<ArrowLeftRight className="w-4 h-4" />} title="Swap Complete">
+          <SwapDetails s={result} />
+          <div className="flex items-center justify-between gap-3 text-sm py-1">
+            <span className="text-gray-500 dark:text-gray-400">Signature</span>
+            <span className="font-mono text-xs flex items-center gap-1">{short(result.hash)} <CopyBtn value={result.hash || ""} /></span>
+          </div>
+          {result.explorerUrl && (
+            <a href={result.explorerUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:underline">
+              View on Solana Explorer <ArrowUpRight className="w-3.5 h-3.5" />
+            </a>
+          )}
+        </CardShell>
+      )
+    case "swapQuote":
+      return (
+        <CardShell icon={<ArrowLeftRight className="w-4 h-4" />} title="Swap Quote">
+          <SwapDetails s={result} />
+          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            {result.tooHighImpact
+              ? "Price impact is too high, so Astrax won't make this swap. Try a smaller amount."
+              : "Just a quote, nothing was swapped. Ask to swap when you're ready."}
+          </p>
         </CardShell>
       )
     default:
@@ -578,6 +639,7 @@ Try things like:
 - "Create a token **MoonCoin MOON** supply **1000000**"
 - "Show the **latest blocks**" or "**SOL** market data"
 - "Create a **payment link** for 0.5 SOL"
+- "**Swap 0.01 SOL** to USDC"
 - "Schedule **2 SOL** to \`<address>\` **in 10 minutes**"
 
 Pick a signing mode in the sidebar **Signing** panel — connect a **wallet** (approve each txn with a button) or go **autonomous** with a secret key. Tap **How it works** anytime for the tour.`
@@ -585,6 +647,7 @@ Pick a signing mode in the sidebar **Signing** panel — connect a **wallet** (a
 const SUGGESTIONS = [
   { icon: <Wallet className="w-3.5 h-3.5" />, label: "Check my SOL balance", prompt: "What's my SOL balance?" },
   { icon: <LineChart className="w-3.5 h-3.5" />, label: "SOL price chart", prompt: "Show me the SOL price chart for the last 7 days" },
+  { icon: <ArrowLeftRight className="w-3.5 h-3.5" />, label: "Swap quote", prompt: "How much USDC would I get for 0.01 SOL?" },
   { icon: <Rocket className="w-3.5 h-3.5" />, label: "Create a token", prompt: "Create a token called MoonCoin with symbol MOON and supply 1000000" },
   { icon: <Code className="w-3.5 h-3.5" />, label: "Workflow diagram", prompt: "Draw a workflow diagram for minting an SPL token" },
   { icon: <Link2 className="w-3.5 h-3.5" />, label: "Payment link", prompt: "Create a payment link for 0.5 SOL" },
