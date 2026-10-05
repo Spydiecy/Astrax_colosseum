@@ -50,8 +50,9 @@ that turns chat into on-chain actions.
   - `scheduleTransfer` / `listSchedules` / `cancelSchedule`.
   - `createPaymentLink` / `listPaymentLinks`.
 - **Utility:** contacts (`saveContact`, `resolveContact`, `listContacts`,
-  `deleteContact`), assets (`storeAsset`, `listAssets`), `generateDiagram` (Mermaid), `generateImage` (Gemini,
-  optional), and `swap` (a stub until a DEX is configured via `SOLANA_DEX`).
+  `deleteContact`), assets (`storeAsset`, `listAssets`), `generateDiagram` (Mermaid) and
+  `generateImage` (Gemini, optional).
+- **Swaps:** `getSwapQuote` and `swap` (see below).
 - Not supported: deploying arbitrary on-chain programs from chat.
 
 ## Payment links
@@ -81,6 +82,27 @@ that turns chat into on-chain actions.
 - Each job is claimed atomically, so it's sent once even if triggers overlap. An
   interrupted send is marked failed, never retried, so nothing is paid twice.
 - **Sidebar "Scheduled" tab:** list and cancel (owner only).
+
+## Token swaps (devnet)
+- "Swap 0.01 SOL to USDC", "convert 5 USDC to SOL", or just a quote: "how much USDC for
+  0.1 SOL?". Works with SOL, USDC or any mint address that has a devnet pool.
+- Jupiter only runs on mainnet, so swaps go through Raydium's public Trade API for devnet
+  (`lib/swap.ts`). It routes across Raydium's devnet pools (multi-hop) and returns a
+  ready-to-sign transaction. No API key needed.
+- **Cards:** you pay, you get (estimate, or the actual amount after an autonomous swap),
+  minimum received, rate, price impact (amber above 5%), max slippage and route.
+- **Wallet mode:** a Swap button, approved in your wallet. **Autonomous:** sent right away.
+- **Safety:**
+  - Default slippage is 1% (up to 5% if you ask). The minimum is enforced on-chain.
+  - Swaps with more than 30% price impact are refused. Devnet pools are thin, so keep
+    amounts small (around 0.01–0.05 SOL).
+  - Balances are checked first (amount plus ~0.01 SOL for fees and rent).
+  - Every Raydium-built transaction is checked before signing: your wallet must be the
+    only signer and fee payer, and it may only call Raydium's devnet programs and the
+    standard System / Token / ATA / Compute Budget programs.
+  - A quote never turns into a swap unless your message asks to swap.
+- Devnet prices come from test pools and don't match the real market. Swaps are off on
+  other clusters for now.
 
 ## Contacts
 - Each wallet has its own address book. Save from chat ("save alice as <address>") or in

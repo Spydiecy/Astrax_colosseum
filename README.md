@@ -47,6 +47,7 @@ it for you in hands-free devnet mode.
 "Create a token called MoonCoin, symbol MOON, supply 1,000,000"
 "Pay the design team 2 SOL every week, 4 times"
 "Make a payment link for 0.5 SOL for logo design"
+"Swap 0.01 SOL to USDC"
 "Is this token safe? <mint address>"
 "Show me the SOL price chart for the last 14 days"
 ```
@@ -60,7 +61,8 @@ it for you in hands-free devnet mode.
 | 💸 | **Chat to transact** | Send SOL or any SPL / Token-2022 token, to an address or a saved contact name. |
 | 🪙 | **Create tokens and NFTs** | Token-2022 mints with on-chain name and symbol, and 1-of-1 NFTs with IPFS metadata. |
 | 🗓️ | **Scheduled payments** | One-off or recurring transfers that go out on their own, even after you close the tab. |
-| 🔗 | **Self-tracking payment links** | Share a link or Solana Pay QR. Astrax finds the payment on-chain and marks it paid. |
+| � | **Token swaps** | Quote and swap SOL, USDC or any devnet token through Raydium's pools, with price impact, minimum received and route. |
+| �🔗 | **Self-tracking payment links** | Share a link or Solana Pay QR. Astrax finds the payment on-chain and marks it paid. |
 | 🛡️ | **Explain anything** | Paste a transaction, wallet, token or program and get a plain-English breakdown with risk flags. |
 | 📈 | **Live market data** | Prices and interactive candlestick charts, rendered right in the chat. |
 | 📇 | **Contacts** | A private address book per wallet, so "pay alice" always means *your* alice. |
@@ -99,6 +101,7 @@ flowchart LR
         LLM["Mistral<br/>ministral-8b"]
         RPC["Solana RPC<br/>(devnet)"]
         MKT["Coinbase / CoinGecko"]
+        DEX["Raydium Trade API<br/>(devnet swaps)"]
         IPFS["Pinata IPFS"]
         DB[("Turso / libSQL")]
         CRON["Vercel Cron<br/>(hourly)"]
@@ -108,6 +111,7 @@ flowchart LR
     AG -- "reasoning" --> LLM
     AG -- "read / send tx" --> RPC
     AG -- "prices" --> MKT
+    AG -- "swap quote + tx" --> DEX
     AG -- "unsigned tx" --> UI
     UI -- "approve" --> W
     W -- "signed tx" --> RPC
@@ -201,6 +205,7 @@ flowchart LR
 | **Framework** | Next.js 15 (App Router), React 19, TypeScript |
 | **AI agent** | Vercel AI SDK 4 (`streamText` with tool calling), Mistral `ministral-8b-latest`, Gemini as fallback |
 | **Blockchain** | `@solana/web3.js`, `@solana/spl-token` (SPL + Token-2022), `@solana/spl-token-metadata`, Solana Pay |
+| **Swaps** | Raydium Trade API on devnet (multi-hop routing across Raydium pools; Jupiter is mainnet-only) |
 | **Wallets** | Solana Wallet Adapter with Wallet Standard auto-detection (Phantom, Solflare, Backpack and more) |
 | **Database** | libSQL: a local file in development, hosted Turso in production |
 | **Storage** | Pinata IPFS for uploads and NFT metadata |
@@ -291,7 +296,7 @@ Locally the database is a file created automatically. Every variable is document
 
 ## 🗺️ Roadmap
 
-- Token swaps through a Solana DEX aggregator
+- Mainnet swaps through Jupiter, alongside today's Raydium devnet swaps
 - Mainnet support with wallet-only signing
 - Payment link webhooks and email receipts
 - Multi-recipient and split payments
