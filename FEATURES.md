@@ -21,8 +21,10 @@ that turns chat into on-chain actions.
 - Saves while a reply streams and syncs between open tabs. A failed request keeps your
   message and shows **Retry**.
 - Replies render markdown (links, lists, tables, code). Raw HTML is never rendered.
-- File attachments upload to IPFS through the server (`/api/upload`). Voice input via the
-  browser's speech API.
+- Image attachments (PNG, JPG, GIF, WebP, up to 10 MB, 4 per message) upload to IPFS
+  through the server (`/api/upload`) as soon as you pick them. Each shows a thumbnail
+  and "Uploaded to IPFS" (or why it was rejected). The server checks the file's real
+  bytes, so a renamed non-image is refused. Voice input via the browser's speech API.
 
 ## Wallet and signing
 - **Wallet mode:** any Wallet Standard wallet (Phantom, Solflare, Backpack…) is detected
@@ -41,7 +43,9 @@ that turns chat into on-chain actions.
 - **Write:**
   - `sendPayment`: SOL, or any SPL / Token-2022 token.
   - `deployToken`: Token-2022 mint with on-chain name/symbol.
-  - `deployNFT`: 1-of-1, mint authority revoked, optional IPFS metadata.
+  - `deployNFT`: 1-of-1, mint authority revoked. Needs an attached image; the server
+    uses the real upload (never a URL the model typed) and pins standard metadata JSON
+    (`name`, `symbol`, `description`, `image`, `properties.files`) to IPFS.
   - `mintTokens`.
   - `scheduleTransfer` / `listSchedules` / `cancelSchedule`.
   - `createPaymentLink` / `listPaymentLinks`.

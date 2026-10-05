@@ -108,9 +108,32 @@ export function TxActionButton({ id, action, onDone }: { id?: string; action: Pe
     }
   }, [id, action, connection, publicKey, sendTransaction, connected, onDone])
 
+  // NFT artwork + links to the IPFS image and metadata, shown before and after confirming.
+  const nftPreview = action.action === "deployNFT" && action.image ? (
+    <div className="mt-3 flex items-center gap-3 rounded-lg border border-gray-200 dark:border-gray-800 p-2">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={action.image} alt={`${action.name || "NFT"} artwork`} className="w-20 h-20 rounded-md object-cover flex-shrink-0 bg-gray-100 dark:bg-gray-900" />
+      <div className="min-w-0 text-xs">
+        <div className="text-sm font-medium truncate">{action.name}{action.symbol ? ` (${action.symbol})` : ""}</div>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+          <a href={action.image} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline">
+            Image on IPFS <ArrowUpRight className="w-3 h-3" />
+          </a>
+          {action.metadataUri && (
+            <a href={action.metadataUri} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline">
+              Metadata JSON <ArrowUpRight className="w-3 h-3" />
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null
+
   if (phase === "done") {
     return (
-      <div className="mt-3 w-full max-w-xl rounded-lg border border-green-300 dark:border-green-900/60 bg-green-50 dark:bg-green-950/30 p-3">
+      <div className="w-full max-w-xl">
+      {nftPreview}
+      <div className="mt-3 w-full rounded-lg border border-green-300 dark:border-green-900/60 bg-green-50 dark:bg-green-950/30 p-3">
         <div className="flex items-center gap-2 text-sm font-medium text-green-700 dark:text-green-300">
           <CheckCircle2 className="w-4 h-4" /> Confirmed
         </div>
@@ -122,6 +145,7 @@ export function TxActionButton({ id, action, onDone }: { id?: string; action: Pe
             View on Solana Explorer ({short(signature)}) <ArrowUpRight className="w-3 h-3" />
           </a>
         )}
+      </div>
       </div>
     )
   }
@@ -148,6 +172,7 @@ export function TxActionButton({ id, action, onDone }: { id?: string; action: Pe
   const busy = phase === "wallet" || phase === "mining"
   return (
     <div className="w-full max-w-xl">
+    {nftPreview}
     {action.to && (
       <div className="mt-3 rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-xs">
         <div className="text-gray-500 dark:text-gray-400">{action.action === "mintTokens" ? "Mint to" : "Recipient"}</div>

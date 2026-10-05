@@ -24,6 +24,7 @@ import { getCurrentId, newChat, getMessages, saveMessages, chatStorageKey } from
 import { explorerTx } from "@/lib/solana"
 import { absoluteUrl } from "@/lib/origin"
 import { VerifyWalletPrompt } from "@/components/verify-wallet"
+import { checkImageFile, IMAGE_ACCEPT, IMAGE_FORMATS_LABEL } from "@/lib/images"
 import type { Message } from "@ai-sdk/react"
 
 // The model sometimes invents UI markup such as "<ConfirmButton>" for the button
@@ -51,7 +52,7 @@ function cardUrls(invocations: any[]): Set<string> {
   for (const inv of invocations ?? []) {
     const r = inv?.result
     if (!r) continue
-    add(r.url); add(r.path); add(r.explorerUrl)
+    add(r.url); add(r.path); add(r.explorerUrl); add(r.image); add(r.metadataUri)
     for (const l of r.links ?? []) { add(l.url); add(l.path) }
   }
   return urls
@@ -162,14 +163,36 @@ const CardShell = ({ icon, title, children }: { icon: React.ReactNode; title: st
 
 const short = (a?: string) => (a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a || "")
 
-/** Upload a file to IPFS through the server (the Pinata key stays server-side). */
-async function uploadToIPFS(file: File): Promise<string> {
+/** Upload an image to IPFS through the server (the Pinata key stays server-side). */
+async function uploadToIPFS(file: File): Promise<{ url: string; contentType: string }> {
   const form = new FormData()
   form.append("file", file)
   const res = await fetch("/api/upload", { method: "POST", body: form })
   const j = await res.json().catch(() => ({}))
   if (!res.ok || !j.ipfsUrl) throw new Error(j.error || `Upload failed (${res.status})`)
-  return j.ipfsUrl as string
+  return { url: j.ipfsUrl as string, contentType: (j.contentType as string) || file.type }
+}
+
+/** An image picked in the composer. It uploads right away so you can see it worked. */
+interface PendingImage {
+  id: string
+  name: string
+  /** Local preview (object URL), revoked when the chip goes away. */
+  preview: string
+  status: "uploading" | "done" | "error"
+  url?: string
+  contentType?: string
+  error?: string
+}
+
+const MAX_ATTACHMENTS = 4
+
+/** Text the model sees for a message's attached images (the bubble only shows thumbnails). */
+function attachmentNote(atts: any[] | undefined): string {
+  const imgs = (atts || []).filter((a) => a?.url && String(a.contentType || "").startsWith("image/"))
+  if (imgs.length === 0) return ""
+  const list = imgs.map((a) => `"${a.name}": ${a.url}`).join(" | ")
+  return `\n\n[The user attached ${imgs.length === 1 ? "an image" : `${imgs.length} images`}, already uploaded to IPFS: ${list}. For an NFT, deployNFT uses it automatically.]`
 }
 
 // ── Image / diagram card (generated images + mermaid diagrams) ──────────────────
@@ -349,7 +372,21 @@ function ToolCard({ result, callId }: { result: any; callId?: string }) {
           {result.supply && <Field label="Supply">{result.supply}</Field>}
           {result.image && (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={result.image} alt="NFT artwork" className="my-2 max-h-40 rounded-md border border-gray-200 dark:border-gray-800" />
+            <img src={result.image} alt={`${result.name || "NFT"} artwork`} className="my-2 max-h-56 rounded-md border border-gray-200 dark:border-gray-800" />
+          )}
+          {(result.image || result.metadataUri) && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs py-1">
+              {result.image && (
+                <a href={result.image} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline">
+                  Image on IPFS <ArrowUpRight className="w-3 h-3" />
+                </a>
+              )}
+              {result.metadataUri && (
+                <a href={result.metadataUri} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline">
+                  Metadata JSON <ArrowUpRight className="w-3 h-3" />
+                </a>
+              )}
+            </div>
           )}
           <div className="flex items-center justify-between gap-3 text-sm py-1">
             <span className="text-gray-500 dark:text-gray-400">Mint</span>
@@ -581,8 +618,11 @@ function ChatSession({ chatId }: { chatId: string }) {
   const address = publicKey?.toBase58() ?? null
   const [isRecording, setIsRecording] = useState(false)
   const [showOnboarding, setShowOnboarding] = useState(false)
-  const [files, setFiles] = useState<File[]>([])
-  const [uploading, setUploading] = useState(false)
+  const [images, setImages] = useState<PendingImage[]>([])
+  const [attachError, setAttachError] = useState("")
+  const uploading = images.some((i) => i.status === "uploading")
+  const hasFailed = images.some((i) => i.status === "error")
+  const readyImages = images.filter((i) => i.status === "done")
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const recognitionRef = useRef<any>(null)
@@ -603,8 +643,26 @@ function ChatSession({ chatId }: { chatId: string }) {
     // instead of silently rolling the chat back; a Retry button is shown.
     keepLastMessageOnError: true,
     experimental_prepareRequestBody: ({ messages }) => ({
-      // Keep the model text-only (strip image attachments used purely for display).
-      messages: messages.map((m: any) => ({ id: m.id, role: m.role, content: m.content, toolInvocations: m.toolInvocations })),
+      // Keep the model text-only: attached images become a short note with their
+      // IPFS links instead of image parts.
+      messages: messages.map((m: any) => ({
+        id: m.id,
+        role: m.role,
+        content: m.role === "user" ? `${m.content || ""}${attachmentNote(m.experimental_attachments)}`.trim() : m.content,
+        toolInvocations: m.toolInvocations,
+      })),
+      // Which images each message carried, so the server picks the real uploaded
+      // image for an NFT instead of trusting a URL the model typed.
+      attachments: Object.fromEntries(
+        messages
+          .filter((m: any) => m.role === "user" && m.experimental_attachments?.length)
+          .map((m: any) => [
+            m.id,
+            m.experimental_attachments
+              .filter((a: any) => a?.url && String(a.contentType || "").startsWith("image/"))
+              .map((a: any) => ({ url: a.url, contentType: a.contentType })),
+          ]),
+      ),
       signingMode: ctxRef.current.signingMode,
       credentials: { privateKey: ctxRef.current.privateKey },
       walletAddress: ctxRef.current.address ?? null,
@@ -709,42 +767,66 @@ function ChatSession({ chatId }: { chatId: string }) {
     rec.start(); setIsRecording(true)
   }
 
+  const canSend = !isLoading && !uploading && !hasFailed && (input.trim().length > 0 || readyImages.length > 0)
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (isLoading || uploading) return
-    if (!input.trim() && files.length === 0) return
+    if (!canSend) return
 
-    // If files are attached, upload them to IPFS first, then hand the links to the agent.
-    if (files.length > 0) {
-      setUploading(true)
-      try {
-        const links: string[] = []
-        const previews: { name: string; contentType: string; url: string }[] = []
-        for (const f of files) {
-          const ipfsUrl = await uploadToIPFS(f)
-          links.push(`${f.name}: ${ipfsUrl}`)
-          // Thumbnail in the user's bubble, served from IPFS (keeps saved history small).
-          if (f.type.startsWith("image/")) previews.push({ name: f.name, contentType: f.type, url: ipfsUrl })
-        }
-        const base = input.trim() ? `${input.trim()}\n\n` : ""
-        const text = `${base}I attached file(s) uploaded to IPFS: ${links.join(" | ")}. Use the IPFS URL as needed — e.g. as the \`image\` for deployNFT, or save it with storeAsset.`
-        setInput("")
-        setFiles([])
-        append({ role: "user", content: text, experimental_attachments: previews })
-      } catch (err: any) {
-        alert(`IPFS upload failed: ${err?.message || "unknown error"}`)
-      } finally {
-        setUploading(false)
-      }
+    // Images are already on IPFS (uploaded when picked); attach their links.
+    if (readyImages.length > 0) {
+      const attachments = readyImages.map((i) => ({ name: i.name, contentType: i.contentType || "image/png", url: i.url! }))
+      readyImages.forEach((i) => URL.revokeObjectURL(i.preview))
+      setImages([])
+      setAttachError("")
+      setInput("")
+      append({ role: "user", content: input.trim(), experimental_attachments: attachments })
       return
     }
 
     handleSubmit(e)
   }
 
+  const updateImage = (id: string, patch: Partial<PendingImage>) =>
+    setImages((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)))
+
+  const removeImage = (id: string) =>
+    setImages((prev) => {
+      const gone = prev.find((i) => i.id === id)
+      if (gone) URL.revokeObjectURL(gone.preview)
+      return prev.filter((i) => i.id !== id)
+    })
+
+  // Validate and upload each picked image straight away, so its chip shows
+  // "Uploading…" → "On IPFS" (or the reason it was rejected) before you send.
   const onPickFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) setFiles((prev) => [...prev, ...Array.from(e.target.files!)])
+    const picked = Array.from(e.target.files || [])
     if (fileInputRef.current) fileInputRef.current.value = ""
+    if (picked.length === 0) return
+
+    const room = MAX_ATTACHMENTS - images.length
+    const problems: string[] = []
+    if (picked.length > room) problems.push(`You can attach up to ${MAX_ATTACHMENTS} images per message.`)
+
+    const accepted: { item: PendingImage; file: File }[] = []
+    for (const file of picked.slice(0, Math.max(0, room))) {
+      const err = checkImageFile(file)
+      if (err) {
+        problems.push(err)
+        continue
+      }
+      const item: PendingImage = { id: crypto.randomUUID(), name: file.name, preview: URL.createObjectURL(file), status: "uploading" }
+      accepted.push({ item, file })
+    }
+    setAttachError(problems.join(" "))
+    if (accepted.length === 0) return
+    setImages((prev) => [...prev, ...accepted.map((a) => a.item)])
+
+    for (const { item, file } of accepted) {
+      uploadToIPFS(file)
+        .then(({ url, contentType }) => updateImage(item.id, { status: "done", url, contentType }))
+        .catch((err: any) => updateImage(item.id, { status: "error", error: err?.message || "Upload failed" }))
+    }
   }
 
   return (
@@ -824,8 +906,15 @@ function ChatSession({ chatId }: { chatId: string }) {
                       {(m as any).experimental_attachments
                         .filter((a: any) => a.contentType?.startsWith("image/"))
                         .map((a: any, i: number) => (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img key={i} src={a.url} alt={a.name} className="max-h-40 rounded-lg border border-gray-300 dark:border-gray-700" />
+                          <figure key={i} className="flex flex-col items-end gap-1">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={a.url} alt={a.name || "Attached image"} className="max-h-40 rounded-lg border border-gray-300 dark:border-gray-700" />
+                            <figcaption>
+                              <a href={a.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:underline">
+                                <Check className="w-3 h-3 text-green-600 dark:text-green-400" /> On IPFS <ArrowUpRight className="w-3 h-3" />
+                              </a>
+                            </figcaption>
+                          </figure>
                         ))}
                     </div>
                   )}
@@ -899,48 +988,85 @@ function ChatSession({ chatId }: { chatId: string }) {
 
       {/* Composer */}
       <div className="border-t border-gray-200 dark:border-gray-800 px-4 py-4">
-        {/* Attached file chips */}
-        {files.length > 0 && (
-          <div className="w-full mb-2 flex flex-wrap gap-2">
-            {files.map((f, i) => (
-              <span key={i} className="inline-flex items-center gap-2 text-xs rounded-md border border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-gray-900 px-2 py-1">
-                <FileText className="w-3.5 h-3.5" /> {f.name}
-                <button type="button" onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))} className="text-gray-500 hover:text-black dark:hover:text-white">
-                  <X className="w-3 h-3" />
+        {/* Picked images: thumbnail + live upload status */}
+        {images.length > 0 && (
+          <ul className="w-full mb-2 flex flex-wrap gap-2" aria-label="Attached images">
+            {images.map((img) => (
+              <li
+                key={img.id}
+                className={cn(
+                  "flex items-center gap-2 rounded-lg border p-1.5 pr-2 text-xs max-w-xs",
+                  img.status === "error"
+                    ? "border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30"
+                    : "border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-gray-900",
+                )}
+              >
+                <div className="relative w-10 h-10 flex-shrink-0 overflow-hidden rounded-md bg-gray-200 dark:bg-gray-800">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={img.preview} alt="" className={cn("w-full h-full object-cover", img.status === "uploading" && "opacity-50")} />
+                  {img.status === "uploading" && (
+                    <Loader2 className="absolute inset-0 m-auto w-4 h-4 animate-spin text-white" aria-hidden />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate font-medium" title={img.name}>{img.name}</div>
+                  <div role="status" aria-live="polite">
+                    {img.status === "uploading" && <span className="text-gray-500 dark:text-gray-400">Uploading to IPFS…</span>}
+                    {img.status === "done" && (
+                      <a href={img.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-green-700 dark:text-green-400 hover:underline">
+                        <Check className="w-3 h-3" /> Uploaded to IPFS
+                      </a>
+                    )}
+                    {img.status === "error" && <span className="text-red-700 dark:text-red-300 line-clamp-2">{img.error}</span>}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeImage(img.id)}
+                  className="ml-1 p-0.5 text-gray-500 hover:text-black dark:hover:text-white"
+                  aria-label={`Remove ${img.name}`}
+                >
+                  <X className="w-3.5 h-3.5" />
                 </button>
-              </span>
+              </li>
             ))}
-          </div>
+          </ul>
+        )}
+        {(attachError || hasFailed) && (
+          <p role="alert" className="mb-2 text-xs text-red-600 dark:text-red-400">
+            {attachError || "Remove the image that failed before sending."}
+          </p>
         )}
         <form onSubmit={onSubmit} className="w-full relative">
           <Input
             value={input}
             onChange={handleInputChange}
-            placeholder={uploading ? "Uploading to IPFS…" : "Message Astrax…"}
-            disabled={isLoading || uploading}
+            placeholder={readyImages.length > 0 || uploading ? "Add a message, e.g. “mint this as an NFT called Sunset”" : "Message Astrax…"}
+            disabled={isLoading}
             className="w-full bg-gray-100 dark:bg-gray-900 border-gray-300 dark:border-gray-700 pr-28 py-5 text-base rounded-lg"
           />
-          <input ref={fileInputRef} type="file" multiple onChange={onPickFiles} className="hidden" accept="image/*,.pdf,.json,.txt,.doc,.docx" />
+          <input ref={fileInputRef} type="file" multiple onChange={onPickFiles} className="hidden" accept={IMAGE_ACCEPT} aria-hidden tabIndex={-1} />
           <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isLoading || uploading}
-              className="p-2 rounded-md text-gray-500 hover:text-black dark:hover:text-white transition-colors"
-              title="Attach a file (stored on IPFS)"
+              disabled={isLoading || images.length >= MAX_ATTACHMENTS}
+              className="p-2 rounded-md text-gray-500 hover:text-black dark:hover:text-white transition-colors disabled:opacity-40"
+              title={`Attach an image (${IMAGE_FORMATS_LABEL}, up to 10 MB)`}
+              aria-label="Attach an image"
             >
               <Paperclip className="w-4 h-4" />
             </button>
             <button
               type="button"
               onClick={toggleRecording}
-              disabled={isLoading || uploading}
+              disabled={isLoading}
               className={cn("p-2 rounded-md transition-colors", isRecording ? "text-red-500 bg-red-50 dark:bg-red-950 animate-pulse" : "text-gray-500 hover:text-black dark:hover:text-white")}
               title={isRecording ? "Stop recording" : "Voice input"}
             >
               {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
             </button>
-            <Button type="submit" size="sm" disabled={isLoading || uploading || (!input.trim() && files.length === 0)} className="bg-gray-800 dark:bg-white text-white dark:text-black hover:bg-gray-700 dark:hover:bg-gray-200">
+            <Button type="submit" size="sm" disabled={!canSend} aria-label={uploading ? "Waiting for upload" : "Send"} className="bg-gray-800 dark:bg-white text-white dark:text-black hover:bg-gray-700 dark:hover:bg-gray-200">
               {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
             </Button>
           </div>
