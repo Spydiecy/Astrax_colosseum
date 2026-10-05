@@ -29,7 +29,8 @@ import {
   serializeTx,
 } from "@/lib/spl"
 import { spotPriceUSD, dailyCandles, indicativeCandles } from "@/lib/prices"
-import { uploadJSONToIPFS, isPinataConfigured } from "@/lib/pinata"
+import { uploadJSONToIPFS, isPinataConfigured, ipfsCid, gatewayUrl } from "@/lib/pinata"
+import { IMAGE_FORMATS_LABEL } from "@/lib/images"
 import { explainTarget } from "@/lib/explain"
 import {
   insertSchedule,
@@ -165,7 +166,8 @@ Guidance:
 - "price chart / candlestick / chart for ${NATIVE_SYMBOL}" → getPriceChart
 - "diagram / workflow / flowchart / visualize this" → generateDiagram (YOU write the Mermaid code)
 - "generate an image of … / draw …" → generateImage
-- When the user attaches a file you'll see its IPFS URL in the message. If they're creating an NFT, pass that URL as the deployNFT "image" argument; otherwise save it with storeAsset. NFT images are optional.
+- Users can attach images (PNG, JPG, GIF, WebP); you'll see a note with their IPFS links. For an NFT, call deployNFT and leave "image" empty: the attached image is used automatically. Never invent an image URL or placeholder. If there's no image, deployNFT tells the user to attach one. To keep an image without minting, use storeAsset.
+- If the user attaches an image and asks for an NFT but gives no name, ask for a name (and symbol) first.
 - "create token MoonCoin MOON supply 1000000" → deployToken (creates an SPL token with on-chain name/symbol)
 - "create an NFT / mint an NFT" → deployNFT (a 1-of-1 SPL token with fixed supply)
 - "mint 500 more <mint>" → mintTokens (only works if the user is the mint authority)
@@ -237,6 +239,52 @@ export async function POST(req: Request) {
   const privateKey: string | undefined = credentials.privateKey || undefined
   const walletAddress: string | undefined =
     body.walletAddress && isValidAddress(body.walletAddress) ? body.walletAddress : undefined
+
+  // ── NFT images ───────────────────────────────────────────────────────────────
+  // The chat UI sends which images each user message carried. Only IPFS links (from
+  // our uploader) count, so the NFT gets the real upload, never a URL or placeholder
+  // the model made up.
+  type Attached = { url: string; contentType?: string }
+  const rawAttachments: Record<string, unknown> =
+    body.attachments && typeof body.attachments === "object" && !Array.isArray(body.attachments) ? body.attachments : {}
+  const attachedFor = (id: string): Attached[] => {
+    const list = rawAttachments[id]
+    if (!Array.isArray(list)) return []
+    return list.slice(0, 8).flatMap((a: any) => {
+      const cid = typeof a?.url === "string" ? ipfsCid(a.url) : null
+      if (!cid) return []
+      const ct = typeof a.contentType === "string" && /^image\/(png|jpeg|gif|webp)$/.test(a.contentType) ? a.contentType : undefined
+      return [{ url: gatewayUrl(cid), contentType: ct }]
+    })
+  }
+  const allAttached: Attached[] = []
+  // Images attached since the last NFT was created, so a new NFT doesn't reuse an old image.
+  let freshAttached: Attached[] = []
+  for (const m of messages) {
+    if (m?.role === "user") {
+      const a = attachedFor(String(m.id))
+      allAttached.push(...a)
+      freshAttached.push(...a)
+    } else if (
+      m?.role === "assistant" &&
+      Array.isArray(m.toolInvocations) &&
+      m.toolInvocations.some((t: any) => t?.toolName === "deployNFT" && t?.state === "result" && !t?.result?.error)
+    ) {
+      freshAttached = []
+    }
+  }
+  const userText = messages.filter((m: any) => m?.role === "user").map((m: any) => String(m.content || "")).join("\n")
+  const resolveNftImage = (arg?: string): Attached | null => {
+    const cid = arg ? ipfsCid(arg) : null
+    if (cid) {
+      // One of the attached images (e.g. the user picked between several)…
+      const known = allAttached.find((x) => ipfsCid(x.url) === cid)
+      if (known) return known
+      // …or an IPFS link the user pasted themselves.
+      if (userText.includes(cid)) return { url: gatewayUrl(cid) }
+    }
+    return freshAttached.length > 0 ? freshAttached[freshAttached.length - 1] : null
+  }
 
   const model = getModel()
   if (!model) {
@@ -619,31 +667,39 @@ export async function POST(req: Request) {
 
       deployNFT: tool({
         description:
-          "Create a 1-of-1 NFT on Solana (SPL token, 0 decimals, supply 1, mint authority revoked) with on-chain name/symbol/uri metadata. The image is OPTIONAL — if the user attached an image (you'll see an IPFS URL in the message), pass it as `image`. Use for 'create an NFT' / 'mint an NFT'.",
+          "Create a 1-of-1 NFT on Solana (SPL token, 0 decimals, supply 1, mint authority revoked) with on-chain name/symbol and IPFS metadata. An NFT needs an image the user attached with the paperclip; the attached image is used automatically, so leave `image` empty. Never make up an image URL or placeholder. Use for 'create an NFT' / 'mint an NFT'.",
         parameters: z.object({
           name: z.string(),
           symbol: z.string(),
-          image: z.string().optional().describe("IPFS/HTTP URL of the NFT image (from an uploaded file). Optional."),
+          image: z.string().optional().describe("Leave empty: the user's attached image is used. Only set it to an IPFS URL from the conversation when the user picks one of several images."),
           description: z.string().optional(),
         }),
         execute: async ({ name, symbol, image, description }) => {
-          let metadataUri: string | undefined
-          let imageUsed: string | undefined
-          if (image) {
-            imageUsed = image
-            if (isPinataConfigured()) {
-              try {
-                const { ipfsUrl } = await uploadJSONToIPFS({ name, description: description || name, image })
-                metadataUri = ipfsUrl
-              } catch {
-                metadataUri = image
-              }
-            } else {
-              metadataUri = image
+          const picked = resolveNftImage(image)
+          if (!picked) {
+            return {
+              error: `An NFT needs an image. Attach one with the paperclip button (${IMAGE_FORMATS_LABEL}, up to 10 MB), wait until it shows "Uploaded to IPFS", then ask again.`,
             }
           }
+          if (!isPinataConfigured()) return { error: "NFT metadata can't be stored because IPFS isn't configured on this server." }
 
-          const params = { name, symbol, decimals: 0, supply: "1", uri: metadataUri || "", fixedSupply: true }
+          // Standard (Metaplex-style) metadata JSON that wallets and explorers read.
+          let metadataUri: string
+          try {
+            const meta = {
+              name,
+              symbol,
+              description: description || name,
+              image: picked.url,
+              properties: { category: "image", files: [{ uri: picked.url, ...(picked.contentType ? { type: picked.contentType } : {}) }] },
+            }
+            metadataUri = (await uploadJSONToIPFS(meta, `${symbol || "nft"}-metadata.json`)).ipfsUrl
+          } catch {
+            return { error: "Couldn't save the NFT metadata to IPFS, so nothing was created. Try again." }
+          }
+          const imageUsed = picked.url
+
+          const params = { name, symbol, decimals: 0, supply: "1", uri: metadataUri, fixedSupply: true }
           if (signingMode === "wallet") {
             if (!ownerAddress) return noSigner()
             return { kind: "action", action: "deployNFT", ...params, image: imageUsed, metadataUri, label: `Create NFT ${name} (${symbol})` }

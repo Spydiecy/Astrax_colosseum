@@ -1,21 +1,21 @@
 import { NextResponse } from "next/server"
 import { uploadFileToIPFS, isPinataConfigured } from "@/lib/pinata"
 import { rateLimited } from "@/lib/db"
+import { checkImageFile, sniffImageType, IMAGE_TYPES, IMAGE_FORMATS_LABEL } from "@/lib/images"
 
 export const runtime = "nodejs"
-
-const MAX_BYTES = 10 * 1024 * 1024 // 10 MB
-const ALLOWED_EXT = /\.(png|jpe?g|gif|webp|svg|pdf|json|txt|doc|docx)$/i
 
 // Per-IP rate limit so the endpoint can't be used to drain the Pinata quota.
 // Stored in the database, so it holds across server instances.
 const WINDOW_MS = 60_000
 const MAX_PER_WINDOW = 20
 
-// Uploads one file to public IPFS via Pinata. The JWT never leaves the server.
+// Uploads one image to public IPFS via Pinata. The JWT never leaves the server.
+// Images only (PNG, JPG, GIF, WebP): checked by name, declared type AND the
+// file's actual bytes, so a renamed PDF or script is rejected.
 export async function POST(req: Request) {
   if (!isPinataConfigured()) {
-    return NextResponse.json({ error: "IPFS uploads aren't configured on this server." }, { status: 503 })
+    return NextResponse.json({ error: "Image uploads aren't configured on this server." }, { status: 503 })
   }
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local"
   if (await rateLimited(`upload:${ip}`, WINDOW_MS, MAX_PER_WINDOW)) {
@@ -29,17 +29,25 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Expected multipart form data with a `file` field." }, { status: 400 })
   }
   if (!(file instanceof File)) return NextResponse.json({ error: "No file provided." }, { status: 400 })
-  if (file.size === 0) return NextResponse.json({ error: "File is empty." }, { status: 400 })
-  if (file.size > MAX_BYTES) return NextResponse.json({ error: "File is larger than 10 MB." }, { status: 413 })
-  if (!ALLOWED_EXT.test(file.name)) {
-    return NextResponse.json({ error: "Unsupported file type." }, { status: 415 })
+
+  const invalid = checkImageFile(file)
+  if (invalid) return NextResponse.json({ error: invalid }, { status: invalid.includes("10 MB") ? 413 : 415 })
+
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const realType = sniffImageType(bytes)
+  if (!realType) {
+    return NextResponse.json({ error: `"${file.name}" isn't a valid image. Use ${IMAGE_FORMATS_LABEL}.` }, { status: 415 })
   }
 
+  // Store under a clean name whose extension matches the real content.
+  const base = file.name.replace(/\.[^.]*$/, "").replace(/[^\w.-]+/g, "_").slice(0, 60) || "image"
+  const clean = new File([bytes], `${base}.${IMAGE_TYPES[realType][0]}`, { type: realType })
+
   try {
-    const { cid, ipfsUrl, size } = await uploadFileToIPFS(file)
-    return NextResponse.json({ cid, ipfsUrl, size, name: file.name })
+    const { cid, ipfsUrl, size } = await uploadFileToIPFS(clean)
+    return NextResponse.json({ cid, ipfsUrl, size, name: file.name, contentType: realType })
   } catch (e: any) {
     console.error("[upload]", e?.message)
-    return NextResponse.json({ error: "IPFS upload failed." }, { status: 502 })
+    return NextResponse.json({ error: "Couldn't upload to IPFS. Try again." }, { status: 502 })
   }
 }

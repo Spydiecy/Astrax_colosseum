@@ -31,6 +31,16 @@ export function gatewayUrl(cid: string): string {
   return host ? `https://${host}/ipfs/${cid}` : `https://ipfs.io/ipfs/${cid}`
 }
 
+/** CID from a gateway URL (our gateway or ipfs.io) or an ipfs:// URI, else null. */
+export function ipfsCid(url: string): string | null {
+  const u = url.trim()
+  const native = u.match(/^ipfs:\/\/(?:ipfs\/)?([A-Za-z0-9]{46,100})\/?$/)
+  if (native) return native[1]
+  const hosts = [gatewayHost(), "ipfs.io", "gateway.pinata.cloud"].filter(Boolean)
+  const m = u.match(/^https:\/\/([^/]+)\/ipfs\/([A-Za-z0-9]{46,100})\/?$/)
+  return m && hosts.includes(m[1]) ? m[2] : null
+}
+
 async function uploadBlob(blob: Blob, name: string): Promise<IpfsUpload> {
   const jwt = process.env.PINATA_JWT
   if (!jwt) throw new Error("IPFS uploads aren't configured (PINATA_JWT is missing).")
