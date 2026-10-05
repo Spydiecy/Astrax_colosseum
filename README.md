@@ -59,7 +59,7 @@ it for you in hands-free devnet mode.
 | | Feature | What it does |
 |---|---|---|
 | 💸 | **Chat to transact** | Send SOL or any SPL / Token-2022 token, to an address or a saved contact name. |
-| 🪙 | **Create tokens and NFTs** | Token-2022 mints with on-chain name and symbol, and 1-of-1 NFTs with IPFS metadata. |
+| 🪙 | **Create tokens and NFTs** | Token-2022 mints with on-chain name and symbol, and 1-of-1 NFTs from an image you upload (PNG, JPG, GIF or WebP), with standard metadata on IPFS. |
 | 🗓️ | **Scheduled payments** | One-off or recurring transfers that go out on their own, even after you close the tab. |
 | � | **Token swaps** | Quote and swap SOL, USDC or any devnet token through Raydium's pools, with price impact, minimum received and route. |
 | �🔗 | **Self-tracking payment links** | Share a link or Solana Pay QR. Astrax finds the payment on-chain and marks it paid. |

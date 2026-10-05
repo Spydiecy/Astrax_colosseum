@@ -4,7 +4,7 @@ import React from 'react'
 import Link from 'next/link'
 import {
     ArrowRight, Menu, X, CheckCircle2, Send, CalendarClock, Link2, ShieldCheck, Wallet, LineChart,
-    Coins, Rocket, BookUser, Boxes, type LucideIcon,
+    Coins, Rocket, BookUser, Boxes, ArrowLeftRight, type LucideIcon,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { AnimatedGroup } from '@/components/ui/animated-group'
@@ -13,26 +13,27 @@ import { TechStack } from '@/components/blocks/tech-stack'
 import { PromptMarquee } from '@/components/blocks/prompt-marquee'
 
 const FEATURES: { icon: LucideIcon; title: string; body: string }[] = [
-    { icon: Send, title: 'Chat to act on-chain', body: 'Send SOL or any SPL token, and create tokens and 1-of-1 NFTs with on-chain names and metadata. Pay saved contacts by name.' },
+    { icon: Send, title: 'Send and swap', body: 'Send SOL or any SPL token, pay saved contacts by name, and swap SOL and USDC through Raydium with a live quote, price impact and route.' },
+    { icon: Rocket, title: 'Create tokens and NFTs', body: 'Launch Token-2022 tokens with on-chain names, or attach an image and mint it as a 1-of-1 NFT with its metadata on IPFS.' },
     { icon: CalendarClock, title: 'Scheduled payments', body: 'One-off or recurring transfers, like a weekly allowance or a monthly salary, sent automatically, even after you close the app.' },
     { icon: Link2, title: 'Payment links that track themselves', body: 'Share a link or Solana Pay QR code. Astrax spots the payment on-chain and marks the link paid, with the transaction.' },
-    { icon: ShieldCheck, title: 'Explain anything', body: 'Paste a transaction, wallet, token or program and get a plain-English breakdown with risk flags before you trust it.' },
-    { icon: Wallet, title: 'Your keys, your choice', body: 'Approve every transaction in your own wallet, or go hands-free with a devnet key. Your contacts, links and schedules are only visible to your wallet.' },
-    { icon: LineChart, title: 'Prices, charts and diagrams', body: 'Live SOL market data, candlestick charts, and Mermaid diagrams of any flow. Chats stay private in your browser.' },
+    { icon: ShieldCheck, title: 'Explain anything', body: 'Paste a transaction, wallet, token or program and get a plain-English breakdown with risk flags. Plus live prices, candlestick charts and diagrams.' },
+    { icon: Wallet, title: 'Your keys, your choice', body: 'Approve every transaction in your own wallet, or go hands-free with a devnet key. Your contacts, links and schedules are only visible to you, and chats stay in your browser.' },
 ]
 
 const STACK_NOTES: { title: string; body: string }[] = [
     { title: 'Interface', body: 'Next.js 15 and React 19, with chat history kept only in your browser.' },
     { title: 'AI agent', body: 'Vercel AI SDK streaming Mistral ministral-8b, calling typed tools for every action.' },
     { title: 'Wallets', body: 'Solana Wallet Adapter for Phantom, Solflare, Backpack and any Wallet Standard wallet. Ownership is proven with a free signed message.' },
-    { title: 'Chain', body: '@solana/web3.js with SPL Token and Token-2022. Payment links use Solana Pay references.' },
+    { title: 'Chain', body: '@solana/web3.js with SPL Token and Token-2022. Payment links use Solana Pay references, and swaps route through Raydium\u2019s devnet pools.' },
     { title: 'Storage', body: 'libSQL locally or Turso when hosted, one row per wallet. Files and NFT metadata on IPFS via Pinata.' },
 ]
 
 const PLAN_ITEMS = [
     'AI chat with copy, edit and regenerate',
     'SOL & SPL token transfers',
-    'Token & NFT creation',
+    'Token swaps with live quotes',
+    'Token & NFT creation with image upload',
     'Scheduled & recurring payments',
     'Tracked payment links with QR codes',
     'Per-wallet contacts',
@@ -43,6 +44,7 @@ const PLAN_ITEMS = [
 const EXAMPLES: { icon: LucideIcon; text: string }[] = [
     { icon: Wallet, text: "What's my SOL balance?" },
     { icon: Send, text: 'Send 0.5 SOL to alice' },
+    { icon: ArrowLeftRight, text: 'Swap 0.01 SOL to USDC' },
     { icon: Rocket, text: 'Create a token MoonCoin MOON supply 1000000' },
     { icon: Link2, text: 'Payment link for 2 SOL for logo design' },
     { icon: CalendarClock, text: 'Pay bob 1 SOL every week, 4 times' },
@@ -51,6 +53,7 @@ const EXAMPLES: { icon: LucideIcon; text: string }[] = [
     { icon: LineChart, text: 'Show the SOL price chart for 30 days' },
     { icon: Coins, text: 'Create an NFT called Genesis with this image' },
     { icon: Boxes, text: 'Show the latest blocks' },
+    { icon: ArrowLeftRight, text: 'How much USDC for 0.1 SOL?' },
 ]
 
 const transitionVariants = {
@@ -128,7 +131,7 @@ export function HeroSection() {
                                     <Link
                                         href="#features"
                                         className="hover:bg-background dark:hover:border-t-border bg-muted group mx-auto flex w-fit items-center gap-4 rounded-full border p-1 pl-4 shadow-md shadow-black/5 transition-all duration-300 dark:border-t-white/5 dark:shadow-zinc-950">
-                                        <span className="text-foreground text-sm">New: tracked payment links & per-wallet contacts</span>
+                                        <span className="text-foreground text-sm">New: token swaps & NFTs from your own images</span>
                                         <span className="dark:border-background block h-4 w-0.5 border-l bg-white dark:bg-zinc-700"></span>
 
                                         <div className="bg-background group-hover:bg-muted size-6 overflow-hidden rounded-full duration-500">
@@ -149,7 +152,7 @@ export function HeroSection() {
                                     </h1>
                                     <p
                                         className="mx-auto mt-8 max-w-2xl text-balance text-lg">
-                                        Send SOL, create tokens and NFTs, schedule payments and share payment links that track themselves, all by chatting. Approve every step in your own wallet.
+                                        Send and swap tokens, create tokens and NFTs, schedule payments and share payment links that track themselves, all by chatting. Approve every step in your own wallet.
                                     </p>
                                 </AnimatedGroup>
 

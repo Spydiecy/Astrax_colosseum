@@ -245,7 +245,7 @@ export function DashboardSidebar({ open, setOpen }: DashboardSidebarProps) {
             <BookUser className="h-4 w-4 flex-shrink-0" />
             {open && <span className="ml-2">Contacts</span>}
           </button>
-          <a href="https://github.com/Spydiecy/Astrax/blob/main/README.md" target="_blank" rel="noopener noreferrer" className={navBtn(false)}>
+          <a href="https://github.com/Spydiecy/Astrax_colosseum#readme" target="_blank" rel="noopener noreferrer" className={navBtn(false)}>
             <FileText className="h-4 w-4 flex-shrink-0" />
             {open && <span className="ml-2">Docs</span>}
           </a>

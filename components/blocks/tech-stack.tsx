@@ -25,8 +25,8 @@ const LAYERS: { icon: LucideIcon; label: string; detail: string; items: string[]
   {
     icon: Blocks,
     label: "Chain",
-    detail: "Transfers, tokens, NFTs and payment tracking",
-    items: ["@solana/web3.js", "SPL Token & Token-2022", "Solana Pay"],
+    detail: "Transfers, swaps, tokens, NFTs and payment tracking",
+    items: ["@solana/web3.js", "SPL Token & Token-2022", "Solana Pay", "Raydium Trade API"],
   },
   {
     icon: Database,
