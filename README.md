@@ -10,7 +10,7 @@ An AI agent that turns a chat message into a real on-chain action: payments, tok
 NFTs, recurring transfers and self-tracking payment links. You stay in control of
 every signature.
 
-[**Live demo**](https://astrax-five.vercel.app) · [Features in depth](FEATURES.md) · [Quick start](#-quick-start)
+[**Live demo**](https://astrax-solana.vercel.app) · [Features in depth](FEATURES.md) · [Quick start](#-quick-start)
 
 ![Next.js](https://img.shields.io/badge/Next.js_15-000000?logo=nextdotjs&logoColor=white)
 ![React](https://img.shields.io/badge/React_19-20232A?logo=react&logoColor=61DAFB)
@@ -306,6 +306,6 @@ Locally the database is a file created automatically. Every variable is document
 
 <div align="center">
 
-Built on Solana · [Live demo](https://astrax-five.vercel.app)
+Built on Solana · [Live demo](https://astrax-solana.vercel.app)
 
 </div>
